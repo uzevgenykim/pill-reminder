@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -385,7 +386,14 @@ fun ChartScreen() {
             }) { Text("▶", fontSize = 20.sp) }
         }
         SummaryLine(doses)
-        Spacer(Modifier.height(8.dp))
+        TextButton(onClick = {
+            val text = buildReport(periodLabel(mode, from, to), doses)
+            val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text)
+            try {
+                ctx.startActivity(Intent.createChooser(send, "Отчёт о приёме").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            } catch (_: Exception) {
+            }
+        }) { Text("📤 Поделиться отчётом") }
 
         when (mode) {
             0 -> {
@@ -549,6 +557,27 @@ fun MonthGrid(
     }
 }
 
+fun buildReport(label: String, doses: List<DoseView>): String {
+    val taken = doses.count { it.dose.status == Status.TAKEN }
+    val missed = doses.count { it.dose.status == Status.MISSED }
+    val pending = doses.count { it.dose.status == Status.PENDING }
+    val sb = StringBuilder()
+    sb.append("Отчёт о приёме лекарств\n").append(label).append("\n\n")
+    sb.append("Принято: $taken, пропущено: $missed, ожидает: $pending\n\n")
+    val dayFmt = DateTimeFormatter.ofPattern("dd.MM")
+    for (v in doses) {
+        val st = when (v.dose.status) {
+            Status.TAKEN -> "принят"
+            Status.MISSED -> "ПРОПУЩЕН"
+            else -> "ожидает"
+        }
+        sb.append(dateOf(v.dose.scheduledAt).format(dayFmt)).append(' ')
+            .append(fmtTime(v.dose.scheduledAt)).append(" — ")
+            .append(v.medicineName).append(" — ").append(st).append('\n')
+    }
+    return sb.toString()
+}
+
 // ---------------------------------------------------------------- «Лекарства»
 
 @Composable
@@ -571,6 +600,8 @@ fun MedsScreen(onEdit: (Long) -> Unit) {
             Spacer(Modifier.height(8.dp))
             SettingsCard()
             Spacer(Modifier.height(8.dp))
+            BackupCard()
+            Spacer(Modifier.height(8.dp))
             if (meds.isEmpty()) {
                 Text("Пока ничего нет. Нажмите «+», чтобы добавить лекарство.")
             }
@@ -584,7 +615,16 @@ fun MedsScreen(onEdit: (Long) -> Unit) {
             ) {
                 Column(Modifier.padding(12.dp)) {
                     Text(m.name, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                    if (m.paused) Text("⏸ Курс на паузе, напоминаний нет", color = GreyDot, fontWeight = FontWeight.Medium)
                     if (m.regimen.isNotBlank()) Text(m.regimen)
+                    if (m.stock >= 0) {
+                        val low = m.stock <= m.timeList().size * 2
+                        Text(
+                            "Осталось таблеток: ${m.stock}" + if (low) " — пора пополнить запас" else "",
+                            color = if (low) Red else MaterialTheme.colorScheme.onSurface,
+                            fontWeight = if (low) FontWeight.Bold else FontWeight.Normal
+                        )
+                    }
                     if (m.dose.isNotBlank()) Text("Доза: ${m.dose}", style = MaterialTheme.typography.bodySmall)
                     Text(
                         "Время: " + m.timeList().joinToString(", ") { it.format(TIME_FMT) },
@@ -604,6 +644,9 @@ fun MedsScreen(onEdit: (Long) -> Unit) {
                     )
                     Row {
                         TextButton(onClick = { onEdit(m.id) }) { Text("Изменить") }
+                        TextButton(onClick = {
+                            appScope.launch { Repo.setPaused(ctx.applicationContext, m.id, !m.paused) }
+                        }) { Text(if (m.paused) "Возобновить" else "Пауза") }
                         TextButton(onClick = { toDelete = m }) { Text("Удалить", color = Red) }
                     }
                 }
@@ -624,6 +667,75 @@ fun MedsScreen(onEdit: (Long) -> Unit) {
                 }) { Text("Удалить", color = Red) }
             },
             dismissButton = { TextButton(onClick = { toDelete = null }) { Text("Отмена") } }
+        )
+    }
+}
+
+@Composable
+fun BackupCard() {
+    val ctx = LocalContext.current.applicationContext
+    var pendingRestore by remember { mutableStateOf<String?>(null) }
+    var message by remember { mutableStateOf<String?>(null) }
+
+    val saver = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json")
+    ) { uri: Uri? ->
+        if (uri != null) {
+            appScope.launch {
+                val ok = runCatching {
+                    val json = Backup.export(ctx)
+                    ctx.contentResolver.openOutputStream(uri)!!.use { it.write(json.toByteArray(Charsets.UTF_8)) }
+                }.isSuccess
+                message = if (ok) "Копия сохранена" else "Не удалось сохранить копию"
+            }
+        }
+    }
+    val loader = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            appScope.launch {
+                val text = runCatching {
+                    ctx.contentResolver.openInputStream(uri)!!.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                }.getOrNull()
+                if (text == null) message = "Не удалось прочитать файл" else pendingRestore = text
+            }
+        }
+    }
+
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp)) {
+            Text("Резервная копия", fontWeight = FontWeight.Bold)
+            Text(
+                "Сохраните данные в файл, чтобы перенести их на другой телефон.",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Row {
+                TextButton(onClick = { saver.launch("tabletki-backup.json") }) { Text("Сохранить копию") }
+                TextButton(onClick = { loader.launch(arrayOf("*/*")) }) { Text("Восстановить") }
+            }
+            message?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+        }
+    }
+
+    pendingRestore?.let { json ->
+        AlertDialog(
+            onDismissRequest = { pendingRestore = null },
+            title = { Text("Восстановить из копии?") },
+            text = { Text("Все текущие лекарства и история будут заменены данными из файла.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingRestore = null
+                    appScope.launch {
+                        message = try {
+                            "Восстановлено лекарств: " + Backup.restore(ctx, json)
+                        } catch (e: Exception) {
+                            "Файл не подходит: " + (e.message ?: "ошибка")
+                        }
+                    }
+                }) { Text("Заменить", color = Red) }
+            },
+            dismissButton = { TextButton(onClick = { pendingRestore = null }) { Text("Отмена") } }
         )
     }
 }
@@ -692,6 +804,9 @@ fun EditScreen(id: Long?, onDone: () -> Unit) {
     val times = remember { mutableStateListOf(LocalTime.of(9, 0)) }
     var start by remember { mutableStateOf(LocalDate.now()) }
     var duration by remember { mutableStateOf("7") }
+    var stock by remember { mutableStateOf("") }
+    var paused by remember { mutableStateOf(false) }
+    var mealShift by remember { mutableIntStateOf(0) }
     var error by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(id) {
@@ -705,6 +820,8 @@ fun EditScreen(id: Long?, onDone: () -> Unit) {
                 count = times.size
                 start = LocalDate.ofEpochDay(m.startEpochDay)
                 duration = m.durationDays.toString()
+                stock = if (m.stock >= 0) m.stock.toString() else ""
+                paused = m.paused
             }
         }
     }
@@ -764,6 +881,20 @@ fun EditScreen(id: Long?, onDone: () -> Unit) {
         }
 
         Text("Время приёма", fontWeight = FontWeight.Bold)
+        Text("Подсказка: привязать время к еде", style = MaterialTheme.typography.bodySmall)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            listOf("До еды" to -30, "Во время" to 0, "После еды" to 30).forEach { (label, shift) ->
+                if (mealShift == shift) {
+                    Button(onClick = { mealShift = shift }, contentPadding = PaddingValues(horizontal = 10.dp)) {
+                        Text(label, fontSize = 13.sp)
+                    }
+                } else {
+                    OutlinedButton(onClick = { mealShift = shift }, contentPadding = PaddingValues(horizontal = 10.dp)) {
+                        Text(label, fontSize = 13.sp)
+                    }
+                }
+            }
+        }
         times.forEachIndexed { i, t ->
             OutlinedButton(
                 onClick = {
@@ -777,12 +908,34 @@ fun EditScreen(id: Long?, onDone: () -> Unit) {
             ) {
                 Text("Приём ${i + 1}:  ${t.format(TIME_FMT)}", fontSize = 16.sp)
             }
+            Row {
+                listOf(
+                    "Завтрак" to LocalTime.of(8, 0),
+                    "Обед" to LocalTime.of(13, 0),
+                    "Ужин" to LocalTime.of(19, 0),
+                    "На ночь" to LocalTime.of(22, 30)
+                ).forEach { (label, base) ->
+                    TextButton(
+                        onClick = { times[i] = base.plusMinutes(mealShift.toLong()) },
+                        contentPadding = PaddingValues(horizontal = 8.dp)
+                    ) { Text(label, fontSize = 13.sp) }
+                }
+            }
         }
 
         OutlinedTextField(
             value = duration,
             onValueChange = { duration = it.filter(Char::isDigit).take(3) },
             label = { Text("Продолжительность, дней") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        OutlinedTextField(
+            value = stock,
+            onValueChange = { stock = it.filter(Char::isDigit).take(4) },
+            label = { Text("Остаток таблеток, шт. (необязательно)") },
             singleLine = true,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
             modifier = Modifier.fillMaxWidth()
@@ -821,7 +974,9 @@ fun EditScreen(id: Long?, onDone: () -> Unit) {
                             dose = dose.trim(),
                             startEpochDay = start.toEpochDay(),
                             durationDays = dur,
-                            times = sorted.joinToString(",") { it.format(TIME_FMT) }
+                            times = sorted.joinToString(",") { it.format(TIME_FMT) },
+                            paused = paused,
+                            stock = stock.toIntOrNull() ?: -1
                         )
                         scope.launch {
                             Repo.saveMedicine(ctx, med)

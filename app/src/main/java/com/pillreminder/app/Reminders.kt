@@ -75,6 +75,7 @@ object Reminders {
             next = minOf(next, now + STEP_MS)
         }
         schedule(ctx, next)
+        runCatching { NextDoseWidget.update(ctx) }
     }
 
     private fun schedule(ctx: Context, at: Long) {
@@ -162,6 +163,14 @@ object Reminders {
         dao.updateDose(
             d.copy(status = status, takenAt = if (status == Status.TAKEN) System.currentTimeMillis() else null)
         )
+        if (d.status != status) {
+            // учёт остатка таблеток
+            val m = dao.getMedicine(d.medicineId)
+            if (m != null && m.stock >= 0) {
+                val delta = (if (status == Status.TAKEN) -1 else 0) + (if (d.status == Status.TAKEN) 1 else 0)
+                if (delta != 0) dao.updateMedicine(m.copy(stock = maxOf(0, m.stock + delta)))
+            }
+        }
         NotificationManagerCompat.from(ctx).cancel(nid(doseId))
         run(ctx)
     }

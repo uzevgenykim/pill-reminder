@@ -2,6 +2,8 @@ package com.pillreminder.app
 
 import android.Manifest
 import android.content.Intent
+import android.widget.FrameLayout
+import android.widget.RemoteViews
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
@@ -13,6 +15,8 @@ import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.rule.GrantPermissionRule
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -88,8 +92,53 @@ class SmokeTest {
             waitText("Новое лекарство")
             rule.onNodeWithText("Название (например, Нольпаза)").performTextInput("Тестовое")
             rule.onNodeWithText("Сохранить").performClick()
+            waitText("Лекарства")
             rule.onNodeWithText("Лекарства").performClick()
             waitText("Тестовое")
+        }
+    }
+
+    @Test
+    fun pauseAndResume() = runBlocking {
+        val dao = AppDb.get(ctx).dao()
+        val id = dao.observeMedicines().first().first().id
+        Repo.setPaused(ctx, id, true)
+        assertEquals(0, dao.pendingDoses().count { it.medicineId == id })
+        Repo.setPaused(ctx, id, false)
+        assertTrue(dao.pendingDoses().count { it.medicineId == id } > 0)
+    }
+
+    @Test
+    fun backupRoundTrip() = runBlocking {
+        val db = AppDb.get(ctx)
+        val medsBefore = db.dao().allMedicines().size
+        val dosesBefore = db.dao().allDoses().size
+        val json = Backup.export(ctx)
+        db.clearAllTables()
+        assertEquals(0, db.dao().allDoses().size)
+        Backup.restore(ctx, json)
+        assertEquals(medsBefore, db.dao().allMedicines().size)
+        assertEquals(dosesBefore, db.dao().allDoses().size)
+    }
+
+    @Test
+    fun stockDecrements() = runBlocking {
+        val dao = AppDb.get(ctx).dao()
+        val m = dao.allMedicines().first()
+        dao.updateMedicine(m.copy(stock = 5))
+        Reminders.setStatus(ctx, doseId, Status.TAKEN)
+        assertEquals(4, dao.getMedicine(m.id)!!.stock)
+        Reminders.setStatus(ctx, doseId, Status.MISSED)
+        assertEquals(5, dao.getMedicine(m.id)!!.stock)
+    }
+
+    @Test
+    fun widgetWorks() {
+        runBlocking { NextDoseWidget.update(ctx) }
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            val rv = RemoteViews(ctx.packageName, R.layout.widget_next_dose)
+            rv.setTextViewText(R.id.w_text, "09:00 · Тест")
+            rv.apply(ctx, FrameLayout(ctx))
         }
     }
 }

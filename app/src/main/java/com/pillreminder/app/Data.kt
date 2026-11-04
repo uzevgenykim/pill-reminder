@@ -1,6 +1,7 @@
 package com.pillreminder.app
 
 import android.content.Context
+import androidx.room.ColumnInfo
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Embedded
@@ -14,6 +15,8 @@ import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.Update
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.room.withTransaction
 import kotlinx.coroutines.flow.Flow
 import java.time.LocalDate
@@ -33,7 +36,9 @@ data class Medicine(
     val dose: String,
     val startEpochDay: Long,
     val durationDays: Int,
-    val times: String // "09:00,15:00,21:00"
+    val times: String, // "09:00,15:00,21:00"
+    @ColumnInfo(defaultValue = "0") val paused: Boolean = false,
+    @ColumnInfo(defaultValue = "-1") val stock: Int = -1 // остаток таблеток; -1 = не учитывать
 ) {
     fun timeList(): List<LocalTime> =
         times.split(",").filter { it.isNotBlank() }.map { LocalTime.parse(it.trim()) }
@@ -101,6 +106,31 @@ interface AppDao {
     @Query("SELECT * FROM doses WHERE id = :id")
     suspend fun getDose(id: Long): Dose?
 
+    @Query("SELECT * FROM medicines")
+    suspend fun allMedicines(): List<Medicine>
+
+    @Query("SELECT * FROM doses")
+    suspend fun allDoses(): List<Dose>
+
+    @Query("DELETE FROM doses")
+    suspend fun deleteAllDoses()
+
+    @Query("DELETE FROM medicines")
+    suspend fun deleteAllMedicines()
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun putMedicines(list: List<Medicine>)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun putDoses(list: List<Dose>)
+
+    @Query(
+        "SELECT d.*, m.name AS medicineName, m.regimen AS regimen " +
+            "FROM doses d INNER JOIN medicines m ON m.id = d.medicineId " +
+            "WHERE d.status = 0 AND d.scheduledAt >= :from ORDER BY d.scheduledAt LIMIT 1"
+    )
+    suspend fun nextPending(from: Long): DoseView?
+
     @Update
     suspend fun updateDose(d: Dose)
 
@@ -118,7 +148,14 @@ interface AppDao {
     suspend fun getDoseView(id: Long): DoseView?
 }
 
-@Database(entities = [Medicine::class, Dose::class], version = 1, exportSchema = false)
+val MIGRATION_1_2 = object : Migration(1, 2) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE medicines ADD COLUMN paused INTEGER NOT NULL DEFAULT 0")
+        db.execSQL("ALTER TABLE medicines ADD COLUMN stock INTEGER NOT NULL DEFAULT -1")
+    }
+}
+
+@Database(entities = [Medicine::class, Dose::class], version = 2, exportSchema = false)
 abstract class AppDb : RoomDatabase() {
     abstract fun dao(): AppDao
 
@@ -130,8 +167,16 @@ abstract class AppDb : RoomDatabase() {
             instance ?: synchronized(this) {
                 instance ?: Room.databaseBuilder(
                     ctx.applicationContext, AppDb::class.java, "pills.db"
-                ).build().also { instance = it }
+                ).addMigrations(MIGRATION_1_2).build().also { instance = it }
             }
+
+        /** Только для тестов: закрыть и забыть открытую базу. */
+        fun resetForTest() {
+            synchronized(this) {
+                instance?.close()
+                instance = null
+            }
+        }
     }
 }
 
@@ -164,7 +209,28 @@ object Repo {
                 dao.deletePendingFrom(med.id, now)
                 med.id
             }
-            dao.insertDoses(generateDoses(med.copy(id = id), now))
+            if (med.paused) {
+                dao.deletePendingFrom(id, 0L)
+            } else {
+                dao.insertDoses(generateDoses(med.copy(id = id), now))
+            }
+        }
+        Reminders.run(ctx)
+    }
+
+    /** Пауза курса: будущие приёмы удаляются; при возобновлении создаются заново. */
+    suspend fun setPaused(ctx: Context, id: Long, paused: Boolean) {
+        val db = AppDb.get(ctx)
+        val dao = db.dao()
+        val now = System.currentTimeMillis()
+        db.withTransaction {
+            val m = dao.getMedicine(id) ?: return@withTransaction
+            dao.updateMedicine(m.copy(paused = paused))
+            if (paused) {
+                dao.deletePendingFrom(id, 0L)
+            } else {
+                dao.insertDoses(generateDoses(m, now))
+            }
         }
         Reminders.run(ctx)
     }
