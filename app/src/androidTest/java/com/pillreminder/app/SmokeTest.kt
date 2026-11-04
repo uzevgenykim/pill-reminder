@@ -102,7 +102,12 @@ class SmokeTest {
             rule.onNodeWithText("Сохранить").performScrollTo().performClick()
             waitText("Лекарства")
             rule.onNodeWithText("Лекарства").performClick()
-            waitText("Тестовое")
+            // карточки списка могут быть ниже видимой области, поэтому проверяем по базе
+            rule.waitUntil(15_000) {
+                runBlocking { AppDb.get(ctx).dao().allMedicines() }.any { it.name == "Тестовое" }
+            }
+            val saved = runBlocking { AppDb.get(ctx).dao().allMedicines() }.first { it.name == "Тестовое" }
+            assertTrue(runBlocking { AppDb.get(ctx).dao().pendingDoses() }.any { it.medicineId == saved.id })
         }
     }
 
