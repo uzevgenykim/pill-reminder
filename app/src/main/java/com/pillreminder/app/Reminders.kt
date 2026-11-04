@@ -91,8 +91,16 @@ object Reminders {
             ctx, 1, Intent(ctx, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        // setAlarmClock срабатывает точно и не требует спецразрешения на точные будильники
-        am.setAlarmClock(AlarmManager.AlarmClockInfo(at, show), pi)
+        // Точный будильник; если система отказала (нет разрешения) - запасной вариант,
+        // чтобы приложение никогда не падало из-за планирования.
+        try {
+            am.setAlarmClock(AlarmManager.AlarmClockInfo(at, show), pi)
+        } catch (e: SecurityException) {
+            try {
+                am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
+            } catch (_: SecurityException) {
+            }
+        }
     }
 
     private fun notifyDose(ctx: Context, v: DoseView) {

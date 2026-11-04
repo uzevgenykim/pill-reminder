@@ -119,7 +119,7 @@ fun MainApp() {
         ) {
             permLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
-        Reminders.run(ctx) // на всякий случай пересчитать будильник
+        runCatching { Reminders.run(ctx) } // на всякий случай пересчитать будильник
     }
 
     if (editing) {
