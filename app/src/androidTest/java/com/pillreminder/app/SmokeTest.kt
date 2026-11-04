@@ -7,6 +7,8 @@ import android.widget.RemoteViews
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.test.printToString
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
@@ -56,8 +58,13 @@ class SmokeTest {
     }
 
     private fun waitText(text: String) {
-        rule.waitUntil(15_000) {
-            rule.onAllNodesWithText(text, substring = true).fetchSemanticsNodes().isNotEmpty()
+        try {
+            rule.waitUntil(15_000) {
+                rule.onAllNodesWithText(text, substring = true).fetchSemanticsNodes().isNotEmpty()
+            }
+        } catch (e: Throwable) {
+            val tree = try { rule.onRoot().printToString().take(1800) } catch (_: Throwable) { "?" }
+            throw AssertionError("Не дождались текста [$text]. Экран:\n$tree")
         }
     }
 
